@@ -6,3 +6,6 @@
 	path = extension-ci-tools
 	url = https://github.com/duckdb/extension-ci-tools
 	branch = main
+[submodule "third_party/plume"]
+	path = third_party/plume
+	url = https://github.com/eth-easl/plume.git

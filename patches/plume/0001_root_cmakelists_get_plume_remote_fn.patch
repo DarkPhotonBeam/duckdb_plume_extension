@@ -1,0 +1,65 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3845416..ab8529f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -42,6 +42,7 @@ option(PLUME_BUILD_CLIENT     "Build the plume client (client)"                O
+ option(PLUME_BUILD_BENCHMARKS "Build the benchmark harness"                    OFF)
+ option(PLUME_BUILD_UBENCH     "Build the ubench micro-benchmark tool"          OFF)
+ option(PLUME_WITH_TESTS       "Build the test suites"                          OFF)
++option(PLUME_INCLUDES         "Include additional cmake files"                 OFF)
+ 
+ # internals
+ option(PLUME_RECYCLING_ALLOCATOR "Recycle small/short-lived allocations through a per-thread free-list pool instead of malloc/free" ON)
+@@ -72,10 +73,12 @@ endif()
+ # resolution. The archive was compiled with -ffunction-sections/-fdata-sections.
+ add_link_options("-Wl,--gc-sections")
+ 
+-include(${CMAKE_SOURCE_DIR}/cmake/DuckDB.cmake)
+-include(${CMAKE_SOURCE_DIR}/cmake/Json.cmake)
+-if(PLUME_WITH_COMPILE_LAYER)
+-  include(${CMAKE_SOURCE_DIR}/cmake/Cpr.cmake)
++if(PLUME_INCLUDES)
++  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/DuckDB.cmake)
++  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Json.cmake)
++  if(PLUME_WITH_COMPILE_LAYER)
++    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Cpr.cmake)
++  endif()
+ endif()
+ 
+ if(PLUME_WITH_TESTS)
+diff --git a/core/include/plume/catalog/plume_remote.hpp b/core/include/plume/catalog/plume_remote.hpp
+index e8ed992..acf71cf 100644
+--- a/core/include/plume/catalog/plume_remote.hpp
++++ b/core/include/plume/catalog/plume_remote.hpp
+@@ -22,6 +22,8 @@ struct PlumeRemoteBindData : duckdb::FunctionData {
+     bool Equals(const duckdb::FunctionData &other) const override;
+ };
+ 
++duckdb::TableFunction GetPlumeRemoteTableFunction(duckdb::shared_ptr<PlumeRemoteInfo> registry);
++
+ Result<std::string> ResolveAndRewriteSources(const std::string &sql, SourceCatalog &catalog, RemoteResolver &resolver);
+ 
+ void RegisterPlumeRemote(duckdb::Connection &con, duckdb::shared_ptr<PlumeRemoteInfo> registry);
+diff --git a/core/src/catalog/plume_remote.cpp b/core/src/catalog/plume_remote.cpp
+index 2f24354..6a0c804 100644
+--- a/core/src/catalog/plume_remote.cpp
++++ b/core/src/catalog/plume_remote.cpp
+@@ -264,6 +264,18 @@ duckdb::unique_ptr<duckdb::BaseStatistics> PlumeRemoteStatistics(duckdb::ClientC
+ } // namespace
+ 
+ 
++duckdb::TableFunction GetPlumeRemoteTableFunction(duckdb::shared_ptr<PlumeRemoteInfo> registry) {
++	duckdb::TableFunction tf(kPlumeRemoteName, {duckdb::LogicalType::VARCHAR}, nullptr, PlumeRemoteBind);
++	tf.cardinality = PlumeRemoteCardinality;
++	tf.statistics_extended = PlumeRemoteStatistics;
++	tf.filter_pushdown = true;
++	tf.projection_pushdown = true;
++	tf.filter_prune = true;
++	tf.function_info = std::move(registry);
++
++	return tf;
++}
++
+ void RegisterPlumeRemote(duckdb::Connection &con, duckdb::shared_ptr<PlumeRemoteInfo> registry) {
+     duckdb::TableFunction tf(kPlumeRemoteName, {duckdb::LogicalType::VARCHAR}, nullptr, PlumeRemoteBind);
+     tf.cardinality = PlumeRemoteCardinality;
