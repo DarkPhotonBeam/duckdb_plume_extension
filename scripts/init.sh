@@ -12,11 +12,11 @@ plume_patches=(
 )
 
 fetch_checkout() {
-  git -C duckdb fetch --depth 1 origin tag "$duckdb_version"
-  git -C duckdb checkout "$duckdb_version"
+  git -C duckdb fetch --depth 1 origin tag "$duckdb_version" &>/dev/null
+  git -C duckdb checkout "$duckdb_version" &>/dev/null
 
-  git -C extension-ci-tools fetch origin
-  git -C extension-ci-tools checkout origin/"$duckdb_version"
+  git -C extension-ci-tools fetch origin &>/dev/null
+  git -C extension-ci-tools checkout origin/"$duckdb_version" &>/dev/null
 
   git add duckdb extension-ci-tools
 }
@@ -34,13 +34,21 @@ apply_patches() {
   shift 2
 
   for patch in "$@"; do
-    local path="$patch_dir$patch"
+    local path="$(pwd)/$patch_dir$patch"
     # check that patch file exists
     [[ -f "$path" ]] || {
       printf "error: patch %s not found in %s\n" "$patch" "$patch_dir" >&2
       exit 2
     }
-    git -C "$submodule" apply "../$path"
+    printf 'Applying patch %s to %s\n' "$patch_dir$patch" "$submodule"
+    if git -C "$submodule" apply --reverse --check "$path" &>/dev/null; then
+      printf 'Skipped. Already applied.\n'
+    elif git -C "$submodule" apply --check "$path" &>/dev/null; then
+      git -C "$submodule" apply "$path"
+      printf 'Patch applied.\n'
+    else
+      printf 'Could not apply patch: Conflicts or partially applied.\n'
+    fi
   done
 }
 
@@ -63,8 +71,10 @@ echo "Applied patches."
 printf "\nDone.\n"
 
 # Check VCPKG_TOOLCHAIN_PATH
-if [[ -n "$VCPKG_ROOT" ]]; then
+if [[ -z "$VCPKG_ROOT" ]]; then
   printf 'Warning: VCPKG_ROOT env var is empty. Make sure vcpkg is installed before running make.\n'
+else
+  printf '\nReady to build:\n\nVCPKG_TOOLCHAIN_PATH=%s/scripts/buildsystems/vcpkg.cmake \\\nmake\n' "$VCPKG_ROOT"
 fi
 
 exit 0
