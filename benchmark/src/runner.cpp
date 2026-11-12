@@ -38,7 +38,14 @@ std::string SourceExpr(const std::string &table, const plume::bench::DataSource 
 	return expr;
 }
 
-std::string ResolvePlaceholders(const std::string &sql, const plume::bench::DataSource &source) {
+std::string DuckDBSourceExpr(const std::string &table, const plume::bench::DataSource &source) {
+	return "read_parquet(" + SourceExpr(table, source) + ")";
+}
+
+using SourceExprFn = std::string (*)(const std::string &, const plume::bench::DataSource &);
+
+std::string ResolvePlaceholders(const std::string &sql, const plume::bench::DataSource &source,
+                                SourceExprFn source_expr = SourceExpr) {
 	std::string out;
 	out.reserve(sql.size());
 	for (size_t i = 0; i < sql.size();) {
@@ -47,7 +54,7 @@ std::string ResolvePlaceholders(const std::string &sql, const plume::bench::Data
 			if (close != std::string::npos) {
 				std::string inner = Trim(sql.substr(i + 1, close - i - 1));
 				if (IsIdent(inner)) {
-					out += SourceExpr(inner, source);
+					out += source_expr(inner, source);
 					i = close + 1;
 					continue;
 				}
@@ -64,6 +71,7 @@ std::string ToPlumeExtQuery(const std::string &query) {
 
 struct ResolvedQuery {
 	std::string query;
+	std::string normal_query;
 	std::string name;
 	std::filesystem::path path;
 };
@@ -84,7 +92,12 @@ void Runner::Run() {
 		}
 		std::string query((std::istreambuf_iterator<char>(sql_file)), std::istreambuf_iterator<char>());
 
-		ResolvedQuery rq{ToPlumeExtQuery(ResolvePlaceholders(query, cfg_.source)), q, query_path};
+		ResolvedQuery rq{
+		    .query = ToPlumeExtQuery(ResolvePlaceholders(query, cfg_.source)),
+			.normal_query = ResolvePlaceholders(query, cfg_.source, DuckDBSourceExpr),
+			.name = q,
+			.path = query_path
+		};
 		resolved_queries.push_back(rq);
 
 		log::Debug("resolved query ", rq.name);
@@ -96,7 +109,25 @@ void Runner::Run() {
 	db.LoadStaticExtension<duckdb::PlumeAdapterExtension>();
 	duckdb::Connection con{db};
 
-	con.Query("SET plume_url = 'http://localhost:9090/hot/matmul';");
+	// Connection::Query doesn't throw on failure; it returns a result with HasError() set.
+	auto exec = [&con](const std::string &sql) -> bool {
+		auto res = con.Query(sql);
+		if (res->HasError()) {
+			log::Error("query failed: ", sql, "\n  ", res->GetError());
+			return false;
+		}
+		return true;
+	};
+
+	const auto &prefix = cfg_.source.path_prefix;
+	if (prefix.rfind("http://", 0) == 0 || prefix.rfind("https://", 0) == 0 || prefix.rfind("s3://", 0) == 0) {
+		if (!exec("INSTALL httpfs;") || !exec("LOAD httpfs;")) {
+			log::Warn("httpfs unavailable; plain DuckDB queries against ", prefix, " will fail");
+		}
+	}
+
+	// todo: don't hardcode dandelion url
+	exec("SET plume_url = 'http://localhost:9090/hot/matmul';");
 
 	auto fb = [](bool b) -> std::string {
 		if (b) {
@@ -105,24 +136,43 @@ void Runner::Run() {
 		return "false";
 	};
 
-	con.Query("SET plume_projection_pushdown = " + fb(cfg_.converter_config.projection_pushdown) + ";");
-	con.Query("SET plume_filter_pushdown = " + fb(cfg_.converter_config.filter_pushdown) + ";");
-	con.Query("SET plume_early_aggregation = " + fb(cfg_.converter_config.early_aggregation) + ";");
-	con.Query("SET plume_optimize_remote_fetching = " + fb(cfg_.converter_config.optimize_remote_fetching) + ";");
-	con.Query("SET plume_max_splits = " + std::to_string(cfg_.converter_config.max_splits) + ';');
-	con.Query("SET plume_target_rows_per_split = " + std::to_string(cfg_.converter_config.target_rows_per_split) + ';');
-	con.Query("SET plume_max_region_bytes = " + std::to_string(cfg_.converter_config.max_region_bytes) + ';');
-	con.Query("SET plume_coalesce_distance = " + std::to_string(cfg_.converter_config.coalesce_distance) + ';');
+	exec("SET plume_projection_pushdown = " + fb(cfg_.converter_config.projection_pushdown) + ";");
+	exec("SET plume_filter_pushdown = " + fb(cfg_.converter_config.filter_pushdown) + ";");
+	exec("SET plume_early_aggregation = " + fb(cfg_.converter_config.early_aggregation) + ";");
+	exec("SET plume_optimize_remote_fetching = " + fb(cfg_.converter_config.optimize_remote_fetching) + ";");
+	exec("SET plume_max_splits = " + std::to_string(cfg_.converter_config.max_splits) + ';');
+	exec("SET plume_target_rows_per_split = " + std::to_string(cfg_.converter_config.target_rows_per_split) + ';');
+	exec("SET plume_max_region_bytes = " + std::to_string(cfg_.converter_config.max_region_bytes) + ';');
+	exec("SET plume_coalesce_distance = " + std::to_string(cfg_.converter_config.coalesce_distance) + ';');
 
 	for (auto &rq : resolved_queries) {
-		log::Info("Running query ", rq.name, "...");
+		log::Info("[PLUME] ", "Running plume query ", rq.name, "...");
 		auto start = std::chrono::steady_clock::now();
 		auto result = con.Query(rq.query);
 		auto now = std::chrono::steady_clock::now();
 		int64_t query_exe_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
-		log::Info("Took ", query_exe_ms, "ms");
-		auto rows = result->RowCount();
-		log::Info("#rows: ", rows);
-		log::Debug(result->ToString());
+		if (result->HasError()) {
+			log::Error("[PLUME] ", rq.name, " failed: ", result->GetError());
+		} else {
+			log::Debug(result->ToString());
+			log::Info("[PLUME] ", rq.name, " Took ", query_exe_ms, "ms");
+			log::Info("[PLUME] ", rq.name, " returned ", result->RowCount(), " rows");
+		}
+		log::Info("");
+		log::Info("[DUCKDB] ", "Running query ", rq.name, " without plume.");
+		log::Debug(rq.normal_query);
+		start = std::chrono::steady_clock::now();
+		result = con.Query(rq.normal_query);
+		now = std::chrono::steady_clock::now();
+		int64_t normal_query_exe_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count();
+		if (result->HasError()) {
+			log::Error("[DUCKDB] ", rq.name, " failed: ", result->GetError());
+		} else {
+			log::Debug(result->ToString());
+			log::Info("[DUCKDB] ", rq.name, " Took ", normal_query_exe_ms, "ms without plume (", query_exe_ms,
+			          "ms with plume)");
+			log::Info("[DUCKDB] ", rq.name, " returned ", result->RowCount(), " rows");
+		}
+		log::Info("");
 	}
 }
