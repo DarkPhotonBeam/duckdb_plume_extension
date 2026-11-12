@@ -19,6 +19,8 @@ set(CMAKE_CXX_STANDARD
     CACHE STRING "C++ standard to enforce")
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(PLUME_EXT_BENCHMARKS "Build the benchmark harness" ON)
+
 include_directories(src/include)
 
 set(EXTENSION_SOURCES src/plume_adapter_extension.cpp)
@@ -71,3 +73,22 @@ install(
   EXPORT "${DUCKDB_EXPORT_SET}"
   LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
+
+if(PLUME_EXT_BENCHMARKS)
+    find_package(cxxopts CONFIG REQUIRED)
+
+    set(PLUME_BENCH_RUNNER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/plume/benchmarks/runner/src)
+    add_executable(plume_ext_bench EXCLUDE_FROM_ALL
+            benchmark/src/main.cpp
+            benchmark/src/runner.cpp
+            # reused unchanged from plume's native harness
+            ${PLUME_BENCH_RUNNER_DIR}/config.cpp
+            ${PLUME_BENCH_RUNNER_DIR}/trace.cpp
+            ${PLUME_BENCH_RUNNER_DIR}/checksum.cpp)
+    # trace.cpp uses std::max without including <algorithm> (works transitively in plume's own build)
+    set_source_files_properties(${PLUME_BENCH_RUNNER_DIR}/trace.cpp PROPERTIES COMPILE_OPTIONS "-include;algorithm")
+    set_target_properties(plume_ext_bench PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    target_include_directories(plume_ext_bench PRIVATE ${PLUME_BENCH_RUNNER_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/benchmark/src)
+    target_link_libraries(plume_ext_bench duckdb_static plume cpr::cpr nlohmann_json::nlohmann_json cxxopts::cxxopts)
+    link_extension_libraries(plume_ext_bench "")
+endif()

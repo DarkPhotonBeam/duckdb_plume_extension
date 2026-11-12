@@ -73,7 +73,26 @@ static unique_ptr<FunctionData> PlumeQueryBind(ClientContext &context, TableFunc
 	context.TryGetCurrentSetting("plume_url", url_val);
 	context.TryGetCurrentSetting("plume_timeout", timeout_val);
 
+	// conversion settings
+	Value projection_pushdown, filter_pushdown, early_aggregation, optimize_remote_fetching, max_splits, target_rows_per_split, max_region_bytes, coalesce_distance;
+	context.TryGetCurrentSetting("plume_projection_pushdown", projection_pushdown);
+	context.TryGetCurrentSetting("plume_filter_pushdown", filter_pushdown);
+	context.TryGetCurrentSetting("plume_early_aggregation", early_aggregation);
+	context.TryGetCurrentSetting("plume_optimize_remote_fetching", optimize_remote_fetching);
+	context.TryGetCurrentSetting("plume_max_splits", max_splits);
+	context.TryGetCurrentSetting("plume_target_rows_per_split", target_rows_per_split);
+	context.TryGetCurrentSetting("plume_max_region_bytes", max_region_bytes);
+	context.TryGetCurrentSetting("plume_coalesce_distance", coalesce_distance);
+
 	plume::parser::ConverterConfig cfg;
+	cfg.projection_pushdown = BooleanValue::Get(projection_pushdown);
+	cfg.filter_pushdown = BooleanValue::Get(filter_pushdown);
+	cfg.early_aggregation = BooleanValue::Get(early_aggregation);
+	cfg.optimize_remote_fetching = BooleanValue::Get(optimize_remote_fetching);
+	cfg.max_splits = UIntegerValue::Get(max_splits);
+	cfg.target_rows_per_split = UBigIntValue::Get(target_rows_per_split);
+	cfg.max_region_bytes = UBigIntValue::Get(max_region_bytes);
+	cfg.coalesce_distance = UBigIntValue::Get(coalesce_distance);
 
 	Connection con(*context.db);
 
@@ -169,9 +188,21 @@ static unique_ptr<GlobalTableFunctionState> PlumeQueryInit(ClientContext & conte
 
 
 static void LoadInternal(ExtensionLoader & loader) {
+	// todo: put config names somewhere better to avoid typos when being referenced
+
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
 	config.AddExtensionOption("plume_url", "Dandelion URL", LogicalType::VARCHAR, Value("http://127.0.0.1:9090/hot/matmul"));
 	config.AddExtensionOption("plume_timeout", "Request timeout in seconds", LogicalType::INTEGER, Value::INTEGER(600));
+
+	// Converter Config
+	config.AddExtensionOption("plume_projection_pushdown", "Enables projection pushdown into the reader, skipping columns not needed for execution.", LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	config.AddExtensionOption("plume_filter_pushdown", "Enables filter pushdown into the reader, allowing the prepare function to prune row groups", LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	config.AddExtensionOption("plume_early_aggregation", "Enables two-phase aggregation: a partial aggregate in the producing stage + a final aggregate.", LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	config.AddExtensionOption("plume_optimize_remote_fetching", "Enables plan builder to optimize remote data fetching.", LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	config.AddExtensionOption("plume_max_splits", "Upper limit on the number of output splits produced.", LogicalType::UINTEGER, Value::UINTEGER(1));
+	config.AddExtensionOption("plume_target_rows_per_split", "How many rows each split should get ideally.", LogicalType::UBIGINT, Value::UBIGINT(1u << 20u));
+	config.AddExtensionOption("plume_max_region_bytes", "Upper limit on the input bytes processed by a source region (0 => unlimited). Overturns max_splits.", LogicalType::UBIGINT, Value::UBIGINT(0));
+	config.AddExtensionOption("plume_coalesce_distance", "Maximum gap to coalesce requests over.", LogicalType::UBIGINT, Value::UBIGINT(1u << 10u));
 
 	auto info = make_shared_ptr<plume::catalog::PlumeRemoteInfo>();
 	info->catalog = std::make_shared<plume::catalog::SourceCatalog>();
